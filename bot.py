@@ -23,7 +23,9 @@ TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN missing")
 
-# ================= DB =================
+ADMIN_IDS = [6138132255, 5635739078]
+
+# ================= DATABASE =================
 conn = sqlite3.connect("escrow.db", check_same_thread=False)
 cursor = conn.cursor()
 
@@ -35,9 +37,9 @@ CREATE TABLE IF NOT EXISTS deals (
     amount TEXT,
     method TEXT,
     status TEXT DEFAULT 'DRAFT',
-    step TEXT,
     created_by TEXT,
-    created_at REAL
+    created_at REAL,
+    dispute INTEGER DEFAULT 0
 )
 """)
 conn.commit()
@@ -54,32 +56,35 @@ def deal_id(did):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
-        [InlineKeyboardButton("🧾 Create Deal", callback_data="start_deal")]
+        [InlineKeyboardButton("🧾 Create Deal", callback_data="start_deal")],
+        [InlineKeyboardButton("📋 Form", callback_data="show_form")]
     ]
 
     await update.message.reply_text(
-        "💼 ESCROW SYSTEM\n\nClick below to start:",
+        "💼 ESCROW PLATFORM\nChoose an option:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
-# ================= FORM (SIMPLE TEXT ONLY) =================
+# ================= FORM =================
 async def form(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    text = """🧾 DEAL FORM
+    text = """🧾 ESCROW DEAL FORM
 
-@admins
+━━━━━━━━━━━━━━
+👤 Seller:
+👤 Buyer:
+💰 Amount:
+💳 Method:
+━━━━━━━━━━━━━━
 
-Seller:
-Buyer:
-Amount:
-Method:
+📌 Fill and send this message back.
 """
 
     await update.message.reply_text(text)
 
 
-# ================= START DEAL =================
+# ================= WIZARD START =================
 async def start_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     q = update.callback_query
@@ -144,7 +149,7 @@ async def deal_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ================= CONFIRM =================
+# ================= CONFIRM DEAL =================
 async def confirm_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     q = update.callback_query
@@ -154,8 +159,8 @@ async def confirm_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = user_state.get(user_id, {}).get("data", {})
 
     cursor.execute("""
-    INSERT INTO deals (seller, buyer, amount, method, status, step, created_by, created_at)
-    VALUES (?, ?, ?, ?, 'ACTIVE', 'done', ?, ?)
+    INSERT INTO deals (seller, buyer, amount, method, status, created_by, created_at)
+    VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?)
     """, (
         data.get("seller"),
         data.get("buyer"),
@@ -185,6 +190,74 @@ async def cancel_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.message.reply_text("❌ Deal cancelled")
 
 
+# ================= PROFILE =================
+async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = str(update.effective_user.id)
+
+    cursor.execute("SELECT status FROM deals WHERE created_by=?", (user,))
+    rows = cursor.fetchall()
+
+    await update.message.reply_text(
+        f"""👤 PROFILE
+
+📦 Total Deals: {len(rows)}
+✅ Active: {sum(1 for r in rows if r[0]=='ACTIVE')}
+❌ Cancelled: {sum(1 for r in rows if r[0]=='CANCELLED')}
+"""
+    )
+
+
+# ================= MY DEALS =================
+async def mydeals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = str(update.effective_user.id)
+
+    cursor.execute("""
+    SELECT id, seller, buyer, amount, method, status
+    FROM deals WHERE created_by=?
+    ORDER BY id DESC
+    """, (user,))
+
+    rows = cursor.fetchall()
+
+    if not rows:
+        return await update.message.reply_text("No deals found.")
+
+    text = "📊 YOUR DEALS\n\n"
+
+    for r in rows:
+        did, seller, buyer, amount, method, status = r
+
+        text += (
+            f"🆔 {deal_id(did)}\n"
+            f"👤 {seller} → {buyer}\n"
+            f"💰 {amount} | 💳 {method}\n"
+            f"📌 {status}\n\n"
+        )
+
+    await update.message.reply_text(text)
+
+
+# ================= DISPUTE =================
+async def dispute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not context.args:
+        return await update.message.reply_text("Usage: /dispute <deal_id>")
+
+    did = context.args[0]
+
+    cursor.execute("""
+    UPDATE deals
+    SET status='DISPUTE', dispute=1
+    WHERE id=?
+    """, (did,))
+
+    conn.commit()
+
+    await update.message.reply_text(f"⚠ Deal #{did} is now under dispute")
+
+
 # ================= ROUTER (FORM TRIGGER) =================
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -198,6 +271,9 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("profile", profile))
+app.add_handler(CommandHandler("mydeals", mydeals))
+app.add_handler(CommandHandler("dispute", dispute))
 
 app.add_handler(CallbackQueryHandler(start_deal, pattern="^start_deal$"))
 app.add_handler(CallbackQueryHandler(confirm_deal, pattern="^confirm_deal$"))
