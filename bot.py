@@ -3,7 +3,12 @@ import sqlite3
 import time
 import logging
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
+
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -24,28 +29,41 @@ PROOF_CHANNEL = os.getenv("PROOF_CHANNEL")
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN missing")
 
-ADMIN_IDS = [6138132255, 5635739078]
+# ================= ADMINS =================
+ADMIN_IDS = [
+    6138132255,
+    5635739078
+]
 
-# ================= DB =================
-conn = sqlite3.connect("escrow.db", check_same_thread=False)
+# ================= DATABASE =================
+conn = sqlite3.connect(
+    "escrow.db",
+    check_same_thread=False
+)
+
 cursor = conn.cursor()
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS deals (
+
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+
     seller_username TEXT,
     buyer_username TEXT,
+
     amount TEXT,
+    currency TEXT,
     method TEXT,
+
     status TEXT,
-    action_type TEXT,
-    deal_message_id INTEGER,
-    activation_message_id INTEGER,
+
     created_at REAL,
-    buyer_confirmed INTEGER DEFAULT 0,
+
+    activator_admin_id INTEGER,
     handled_by TEXT,
-    action_locked INTEGER DEFAULT 0,
-    activator_admin_id INTEGER
+
+    deal_message_id INTEGER,
+    control_message_id INTEGER
 )
 """)
 
@@ -61,26 +79,22 @@ def safe_user(user):
 def deal_id(did):
     return f"#{did:03d}"
 
-def duration(start):
-    s = int(time.time() - start)
-    m = s // 60
-    h = m // 60
-    m = m % 60
-    return f"{h}h {m}m" if h else f"{m}m"
-
-
-# ================= PROOF CHANNEL FIX =================
+# ================= PROOF CHANNEL =================
 async def send_to_proof(context, text):
+
     if not PROOF_CHANNEL:
         return
 
     try:
+
         chat_id = PROOF_CHANNEL
 
-        # ensure correct format for public channels
-        if isinstance(chat_id, str):
-            if not chat_id.startswith("@") and not chat_id.startswith("-100"):
-                chat_id = "@" + chat_id
+        if (
+            isinstance(chat_id, str)
+            and not chat_id.startswith("@")
+            and not chat_id.startswith("-100")
+        ):
+            chat_id = "@" + chat_id
 
         await context.bot.send_message(
             chat_id=chat_id,
@@ -90,202 +104,340 @@ async def send_to_proof(context, text):
     except Exception as e:
         logger.error(f"Proof channel error: {e}")
 
-
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Escrow Bot Running ✅")
 
+    await update.message.reply_text(
+        "Escrow Bot Running ✅"
+    )
 
 # ================= DEAL FORM =================
 async def deal_form(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    if update.message is None or update.message.text is None:
+    if not update.message or not update.message.text:
         return
 
-    text = update.message.text
+    text = update.message.text.strip()
 
-    # FORM TEMPLATE
-    if text.strip().lower() == "form":
-        form_text = """🧾 DEAL FORM
+    # ================= TEMPLATE =================
+    if text.lower() == "form":
 
-@admins
+        await update.message.reply_text(
+            """@admins
 
 Seller:
 Buyer:
 Amount:
-Method:
-"""
-        await update.message.reply_text(form_text)
+Currency:
+Method:"""
+        )
+
         return
 
-    # PARSE FORM
-    if "buyer:" not in text.lower() or "seller:" not in text.lower():
+    # ================= REAL FORM =================
+    if (
+        "seller:" not in text.lower()
+        or "buyer:" not in text.lower()
+    ):
         return
 
-    lines = text.split("\n")
-    data = {}
+    try:
 
-    for line in lines:
-        if ":" in line:
-            key, value = line.split(":", 1)
-            data[key.strip().lower()] = value.strip()
+        data = {}
 
-    seller = clean_username(data.get("seller"))
-    buyer = clean_username(data.get("buyer"))
-    amount = data.get("amount", "")
-    method = data.get("method", "")
+        for line in text.split("\n"):
 
-    if not seller or not buyer or not amount or not method:
-        return await update.message.reply_text("❌ Invalid form")
+            if ":" in line:
+
+                key, value = line.split(":", 1)
+
+                data[
+                    key.strip().lower()
+                ] = value.strip()
+
+        seller = clean_username(
+            data.get("seller")
+        )
+
+        buyer = clean_username(
+            data.get("buyer")
+        )
+
+        amount = data.get("amount", "")
+        currency = data.get("currency", "")
+        method = data.get("method", "")
+
+        if (
+            not seller
+            or not buyer
+            or not amount
+            or not currency
+            or not method
+        ):
+            return await update.message.reply_text(
+                "❌ Invalid form"
+            )
+
+        # ================= SAVE DEAL =================
+        cursor.execute("""
+        INSERT INTO deals (
+            seller_username,
+            buyer_username,
+            amount,
+            currency,
+            method,
+            status,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            seller,
+            buyer,
+            amount,
+            currency.upper(),
+            method,
+            "PENDING",
+            time.time()
+        ))
+
+        conn.commit()
+
+        did = cursor.lastrowid
+
+        # ================= ADMIN BUTTONS =================
+        keyboard = [[
+            InlineKeyboardButton(
+                "✅ Activate Deal",
+                callback_data=f"activate_{did}"
+            ),
+
+            InlineKeyboardButton(
+                "❌ Cancel Deal",
+                callback_data=f"admincancel_{did}"
+            )
+        ]]
+
+        msg = await update.message.reply_text(
+            f"🚨 NEW DEAL {deal_id(did)}\n\n"
+            f"👤 Seller: @{seller}\n"
+            f"👤 Buyer: @{buyer}\n"
+            f"💰 Amount: {amount} {currency.upper()}\n"
+            f"💳 Method: {method}\n\n"
+            f"⏳ Waiting admin action...",
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            )
+        )
+
+        cursor.execute("""
+        UPDATE deals
+        SET deal_message_id=?
+        WHERE id=?
+        """, (
+            msg.message_id,
+            did
+        ))
+
+        conn.commit()
+
+    except Exception as e:
+        logger.error(e)
+
+# ================= ADMIN BUTTONS =================
+async def admin_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    q = update.callback_query
+    await q.answer()
+
+    if q.from_user.id not in ADMIN_IDS:
+        return await q.answer(
+            "❌ Admin only",
+            show_alert=True
+        )
+
+    action, did = q.data.split("_")
+    did = int(did)
+
+    # ================= ACTIVATE =================
+    if action == "activate":
+
+        cursor.execute("""
+        SELECT seller_username,
+               buyer_username,
+               amount,
+               currency,
+               method
+        FROM deals
+        WHERE id=?
+        """, (did,))
+
+        row = cursor.fetchone()
+
+        if not row:
+            return
+
+        seller, buyer, amount, currency, method = row
+
+        keyboard = [[
+            InlineKeyboardButton(
+                "💸 Release",
+                callback_data=f"release_{did}"
+            ),
+
+            InlineKeyboardButton(
+                "♻ Refund",
+                callback_data=f"refund_{did}"
+            ),
+
+            InlineKeyboardButton(
+                "❌ Cancel",
+                callback_data=f"cancel_{did}"
+            )
+        ]]
+
+        msg = await q.message.reply_text(
+            f"✅ DEAL ACTIVATED {deal_id(did)}\n\n"
+            f"👤 Seller: @{seller}\n"
+            f"👤 Buyer: @{buyer}\n"
+            f"💰 {amount} {currency}\n"
+            f"💳 {method}\n\n"
+            f"👉 Seller can now choose action",
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            )
+        )
+
+        cursor.execute("""
+        UPDATE deals
+        SET status=?,
+            activator_admin_id=?,
+            control_message_id=?
+        WHERE id=?
+        """, (
+            "ACTIVE",
+            q.from_user.id,
+            msg.message_id,
+            did
+        ))
+
+        conn.commit()
+
+        await q.edit_message_text(
+            f"✅ Deal {deal_id(did)} activated"
+        )
+
+    # ================= ADMIN CANCEL =================
+    elif action == "admincancel":
+
+        cursor.execute("""
+        UPDATE deals
+        SET status=?,
+            handled_by=?
+        WHERE id=?
+        """, (
+            "CANCELLED",
+            safe_user(q.from_user),
+            did
+        ))
+
+        conn.commit()
+
+        await q.edit_message_text(
+            f"❌ Deal {deal_id(did)} cancelled"
+        )
+
+        cursor.execute("""
+        SELECT seller_username,
+               buyer_username,
+               amount,
+               currency,
+               method
+        FROM deals
+        WHERE id=?
+        """, (did,))
+
+        row = cursor.fetchone()
+
+        if row:
+
+            seller, buyer, amount, currency, method = row
+
+            await send_to_proof(
+                context,
+                f"❌ CANCELLED DEAL\n\n"
+                f"🆔 {deal_id(did)}\n"
+                f"👤 @{seller} ↔ @{buyer}\n"
+                f"💰 {amount} {currency}\n"
+                f"💳 {method}"
+            )
+
+# ================= SELLER BUTTONS =================
+async def seller_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    q = update.callback_query
+    await q.answer()
+
+    action, did = q.data.split("_")
+    did = int(did)
 
     cursor.execute("""
-    INSERT INTO deals (
-        seller_username,
-        buyer_username,
-        amount,
-        method,
-        status,
-        created_at
-    )
-    VALUES (?, ?, ?, ?, ?, ?)
-    """, (seller, buyer, amount, method, "PENDING", time.time()))
-
-    conn.commit()
-
-    did = cursor.lastrowid
-
-    msg = await update.message.reply_text(
-        f"🚨 NEW DEAL {deal_id(did)}\n\n"
-        f"👤 Seller: @{seller}\n"
-        f"👤 Buyer: @{buyer}\n"
-        f"💰 Amount: {amount}\n"
-        f"💳 Method: {method}\n\n"
-        f"⏳ Waiting admin activation..."
-    )
-
-    cursor.execute("""
-    UPDATE deals
-    SET deal_message_id=?
+    SELECT seller_username,
+           buyer_username
+    FROM deals
     WHERE id=?
-    """, (msg.message_id, did))
+    """, (did,))
 
-    conn.commit()
+    row = cursor.fetchone()
 
-    # ================= PROOF CHANNEL POST =================
-    await send_to_proof(context,
-        f"🚨 NEW DEAL\n\n"
+    if not row:
+        return
+
+    seller, buyer = row
+
+    user = clean_username(
+        safe_user(q.from_user)
+    )
+
+    if user != seller:
+        return await q.answer(
+            "❌ Only seller",
+            show_alert=True
+        )
+
+    keyboard = [[
+        InlineKeyboardButton(
+            "✅ Accept",
+            callback_data=f"buyerok_{did}"
+        ),
+
+        InlineKeyboardButton(
+            "❌ Reject",
+            callback_data=f"buyerrej_{did}"
+        )
+    ]]
+
+    await q.message.reply_text(
+        f"⚠ SELLER REQUEST\n\n"
         f"🆔 {deal_id(did)}\n"
-        f"👤 Seller: @{seller}\n"
-        f"👤 Buyer: @{buyer}\n"
-        f"💰 {amount}\n"
-        f"💳 {method}\n"
-        f"📌 Status: PENDING"
-    )
-
-
-# ================= ACTIVATE =================
-async def activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if update.effective_user.id not in ADMIN_IDS:
-        return await update.message.reply_text("❌ Admin only")
-
-    if not update.message.reply_to_message:
-        return await update.message.reply_text("Reply to deal message")
-
-    msg_id = update.message.reply_to_message.message_id
-
-    cursor.execute("""
-    SELECT id, seller_username, buyer_username, amount, method
-    FROM deals
-    WHERE deal_message_id=?
-    """, (msg_id,))
-
-    row = cursor.fetchone()
-
-    if not row:
-        return await update.message.reply_text("Deal not found")
-
-    did, seller, buyer, amount, method = row
-
-    msg = await update.message.reply_text(
-        f"✅ DEAL ACTIVATED {deal_id(did)}\n\n"
-        f"👉 Seller must reply to THIS message"
+        f"📌 Action: {action.upper()}\n\n"
+        f"👉 @{buyer} please accept or reject",
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        )
     )
 
     cursor.execute("""
     UPDATE deals
-    SET status=?,
-        activator_admin_id=?,
-        activation_message_id=?
+    SET status=?
     WHERE id=?
-    """, ("ACTIVE", update.effective_user.id, msg.message_id, did))
+    """, (
+        action.upper(),
+        did
+    ))
 
     conn.commit()
 
-    await send_to_proof(context,
-        f"✅ DEAL ACTIVATED\n🆔 {deal_id(did)}"
-    )
-
-
-# ================= SELLER ACTION =================
-async def seller_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action):
-
-    if not update.message.reply_to_message:
-        return await update.message.reply_text("Reply to activated deal")
-
-    msg_id = update.message.reply_to_message.message_id
-
-    cursor.execute("""
-    SELECT id, seller_username, buyer_username,
-           status, action_locked
-    FROM deals
-    WHERE activation_message_id=?
-    """, (msg_id,))
-
-    row = cursor.fetchone()
-
-    if not row:
-        return await update.message.reply_text("Invalid deal")
-
-    did, seller, buyer, status, locked = row
-
-    if status != "ACTIVE":
-        return await update.message.reply_text("Not active")
-
-    if locked == 1:
-        return await update.message.reply_text("Already processed")
-
-    sender = clean_username(safe_user(update.effective_user))
-
-    if sender != seller:
-        return await update.message.reply_text("Only seller allowed")
-
-    cursor.execute("""
-    UPDATE deals
-    SET action_type=?, action_locked=1
-    WHERE id=?
-    """, (action, did))
-
-    conn.commit()
-
-    await update.message.reply_text(f"⚠ Seller requested: {action.upper()}")
-
-    await send_to_proof(context,
-        f"📌 SELLER ACTION\n🆔 {deal_id(did)}\n⚡ {action.upper()}"
-    )
-
-
-async def release(update, context):
-    await seller_action(update, context, "release")
-
-async def refund(update, context):
-    await seller_action(update, context, "refund")
-
-async def cancel(update, context):
-    await seller_action(update, context, "cancel")
-
-
-# ================= BUYER =================
+# ================= BUYER BUTTONS =================
 async def buyer_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     q = update.callback_query
@@ -295,127 +447,283 @@ async def buyer_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     did = int(did)
 
     cursor.execute("""
-    SELECT buyer_username, action_type
+    SELECT buyer_username,
+           seller_username,
+           amount,
+           currency,
+           method,
+           status
     FROM deals
     WHERE id=?
     """, (did,))
 
     row = cursor.fetchone()
+
     if not row:
         return
 
-    buyer, action_type = row
+    buyer, seller, amount, currency, method, status = row
 
-    user = clean_username(safe_user(q.from_user))
-
-    if user != buyer:
-        return await q.answer("Only buyer", show_alert=True)
-
-    if action == "rej":
-        await q.edit_message_text("❌ Rejected")
-
-        await send_to_proof(context, f"❌ BUYER REJECTED\n🆔 {deal_id(did)}")
-        return
-
-    cursor.execute("""
-    UPDATE deals
-    SET buyer_confirmed=1,
-        status=?
-    WHERE id=?
-    """, (f"{action_type.upper()}_CONFIRMED", did))
-
-    conn.commit()
-
-    await q.edit_message_text("✅ Buyer confirmed")
-
-    await send_to_proof(context,
-        f"✅ BUYER CONFIRMED\n🆔 {deal_id(did)}"
+    user = clean_username(
+        safe_user(q.from_user)
     )
 
+    if user != buyer:
+        return await q.answer(
+            "❌ Only buyer",
+            show_alert=True
+        )
 
-# ================= ADMIN =================
-async def admin_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ================= REJECT =================
+    if action == "buyerrej":
 
-    q = update.callback_query
-    await q.answer()
+        await q.edit_message_text(
+            "❌ Buyer rejected request"
+        )
 
-    _, status, did = q.data.split("_")
-    did = int(did)
-
-    cursor.execute("""
-    SELECT activator_admin_id,
-           seller_username,
-           buyer_username,
-           amount,
-           method,
-           action_type
-    FROM deals
-    WHERE id=?
-    """, (did,))
-
-    row = cursor.fetchone()
-    if not row:
         return
 
-    activator_id, seller, buyer, amount, method, action_type = row
+    # ================= FINAL STATUS =================
+    if status == "RELEASE":
+        final = "SUCCESSFUL"
 
-    if q.from_user.id != activator_id:
-        return await q.answer("Only admin", show_alert=True)
+    elif status == "REFUND":
+        final = "REFUNDED"
 
-    final = "COMPLETED" if status == "ok" else "CANCELLED"
+    else:
+        final = "CANCELLED"
 
     cursor.execute("""
     UPDATE deals
     SET status=?,
         handled_by=?
     WHERE id=?
-    """, (final, safe_user(q.from_user), did))
+    """, (
+        final,
+        seller,
+        did
+    ))
 
     conn.commit()
 
     await q.edit_message_text(
-        f"📢 FINAL RESULT\n\n"
+        f"✅ Deal {deal_id(did)} completed\n"
+        f"📌 Status: {final}"
+    )
+
+    # ================= PROOF CHANNEL =================
+    await send_to_proof(
+        context,
+        f"📢 {final} DEAL\n\n"
         f"🆔 {deal_id(did)}\n"
-        f"👤 @{seller} → @{buyer}\n"
-        f"💰 {amount}\n"
-        f"💳 {method}\n"
-        f"📌 {final}"
+        f"👤 @{seller} ↔ @{buyer}\n"
+        f"💰 {amount} {currency}\n"
+        f"💳 {method}"
     )
 
-    await send_to_proof(context,
-        f"📢 FINAL RESULT\n🆔 {deal_id(did)}\n📌 {final}"
-    )
-
-
-# ================= STATS =================
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= EDIT DEAL =================
+async def edit_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if update.effective_user.id not in ADMIN_IDS:
-        return
+        return await update.message.reply_text(
+            "❌ Admin only"
+        )
 
-    cursor.execute("SELECT status FROM deals")
-    rows = cursor.fetchall()
+    try:
 
-    await update.message.reply_text(
-        f"📊 TOTAL: {len(rows)}\n"
-        f"ACTIVE: {sum(1 for r in rows if r[0]=='ACTIVE')}\n"
-        f"COMPLETED: {sum(1 for r in rows if r[0]=='COMPLETED')}"
+        args = context.args
+
+        if len(args) < 3:
+            return await update.message.reply_text(
+                "Usage:\n"
+                "/edit dealid field value"
+            )
+
+        did = int(args[0])
+        field = args[1].lower()
+        value = " ".join(args[2:])
+
+        allowed = [
+            "amount",
+            "currency",
+            "method"
+        ]
+
+        if field not in allowed:
+            return await update.message.reply_text(
+                "❌ Invalid field"
+            )
+
+        cursor.execute(
+            f"UPDATE deals SET {field}=? WHERE id=?",
+            (
+                value.upper()
+                if field == "currency"
+                else value,
+                did
+            )
+        )
+
+        conn.commit()
+
+        await update.message.reply_text(
+            f"✅ Deal {deal_id(did)} updated\n\n"
+            f"{field.upper()} → {value}"
+        )
+
+    except Exception as e:
+
+        logger.error(e)
+
+        await update.message.reply_text(
+            "❌ Edit failed"
+        )
+
+# ================= USER STATS =================
+async def me(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    username = clean_username(
+        safe_user(update.effective_user)
     )
 
+    # ETB
+    cursor.execute("""
+    SELECT COUNT(*)
+    FROM deals
+    WHERE (
+        seller_username=?
+        OR buyer_username=?
+    )
+    AND currency='ETB'
+    AND status='SUCCESSFUL'
+    """, (
+        username,
+        username
+    ))
+
+    etb = cursor.fetchone()[0]
+
+    # USDT
+    cursor.execute("""
+    SELECT COUNT(*)
+    FROM deals
+    WHERE (
+        seller_username=?
+        OR buyer_username=?
+    )
+    AND currency='USDT'
+    AND status='SUCCESSFUL'
+    """, (
+        username,
+        username
+    ))
+
+    usdt = cursor.fetchone()[0]
+
+    total = etb + usdt
+
+    await update.message.reply_text(
+        f"👤 YOUR STATS\n\n"
+        f"📦 Total Deals: {total}\n"
+        f"🇪🇹 ETB Deals: {etb}\n"
+        f"💵 USDT Deals: {usdt}"
+    )
+
+# ================= ADMIN STATS =================
+async def mee(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if update.effective_user.id not in ADMIN_IDS:
+        return await update.message.reply_text(
+            "❌ Admin only"
+        )
+
+    admin = clean_username(
+        safe_user(update.effective_user)
+    )
+
+    # ETB
+    cursor.execute("""
+    SELECT COUNT(*)
+    FROM deals
+    WHERE handled_by=?
+    AND currency='ETB'
+    AND status='SUCCESSFUL'
+    """, (admin,))
+
+    etb = cursor.fetchone()[0]
+
+    # USDT
+    cursor.execute("""
+    SELECT COUNT(*)
+    FROM deals
+    WHERE handled_by=?
+    AND currency='USDT'
+    AND status='SUCCESSFUL'
+    """, (admin,))
+
+    usdt = cursor.fetchone()[0]
+
+    total = etb + usdt
+
+    await update.message.reply_text(
+        f"🛡 ADMIN STATS\n\n"
+        f"📦 Total Handled: {total}\n"
+        f"🇪🇹 ETB Deals: {etb}\n"
+        f"💵 USDT Deals: {usdt}"
+    )
 
 # ================= MAIN =================
-app = ApplicationBuilder().token(TOKEN).build()
+app = ApplicationBuilder().token(
+    TOKEN
+).build()
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("activate", activate))
-app.add_handler(CommandHandler("release", release))
-app.add_handler(CommandHandler("refund", refund))
-app.add_handler(CommandHandler("cancel", cancel))
-app.add_handler(CommandHandler("stats", stats))
+app.add_handler(
+    CommandHandler("start", start)
+)
 
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, deal_form))
+app.add_handler(
+    CommandHandler("edit", edit_deal)
+)
 
-app.add_handler(CallbackQueryHandler(buyer_buttons, pattern="^(acc|rej)_"))
-app.add_handler(CallbackQueryHandler(admin_buttons, pattern="^adm_"))
+app.add_handler(
+    CommandHandler("me", me)
+)
+
+app.add_handler(
+    CommandHandler("mee", mee)
+)
+
+app.add_handler(
+    MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        deal_form
+    )
+)
+
+# ADMIN
+app.add_handler(
+    CallbackQueryHandler(
+        admin_buttons,
+        pattern="^(activate|admincancel)_"
+    )
+)
+
+# SELLER
+app.add_handler(
+    CallbackQueryHandler(
+        seller_buttons,
+        pattern="^(release|refund|cancel)_"
+    )
+)
+
+# BUYER
+app.add_handler(
+    CallbackQueryHandler(
+        buyer_buttons,
+        pattern="^(buyerok|buyerrej)_"
+    )
+)
+
+print("BOT RUNNING ✅")
 
 app.run_polling()
