@@ -1,5 +1,1 @@
-setuptools==69.5.1
-wheel
-python-telegram-bot==13.15
-urllib3==1.26.18
-APScheduler==3.6.3
+python-telegram-bot==20.7
