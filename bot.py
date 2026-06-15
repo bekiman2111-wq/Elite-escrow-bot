@@ -69,8 +69,8 @@ async def send_proof(context, text):
         if chat:
             try:
                 await context.bot.send_message(chat_id=chat, text=text)
-            except:
-                pass
+            except Exception as e:
+                logger.error(e)
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -79,7 +79,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= FORM =================
 async def deal_form(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    if not update.message:
+    if not update.message or not update.message.text:
         return
 
     text = update.message.text.strip()
@@ -101,9 +101,9 @@ async def deal_form(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     seller = clean(data.get("seller"))
     buyer = clean(data.get("buyer"))
-    amount = data.get("amount")
+    amount = data.get("amount", "")
     currency = data.get("currency", "").upper()
-    method = data.get("method")
+    method = data.get("method", "")
 
     if not all([seller, buyer, amount, currency, method]):
         return await update.message.reply_text("❌ Invalid form")
@@ -129,61 +129,78 @@ async def deal_form(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
-# ================= ADMIN =================
+# ================= ADMIN BUTTONS (FIXED) =================
 async def admin_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     q = update.callback_query
     await q.answer()
 
     if q.from_user.id not in ADMIN_IDS:
-        return
+        return await q.answer("Admin only", show_alert=True)
 
-    action, did_id = q.data.split("_")
-    did_id = int(did_id)
+    try:
+        action, did_id = q.data.split("_")
+        did_id = int(did_id)
 
-    if action == "activate":
+        # ================= ACTIVATE =================
+        if action == "activate":
 
-        cursor.execute("""
-        SELECT seller_username,buyer_username,amount,currency,method
-        FROM deals WHERE id=?
-        """, (did_id,))
-        seller, buyer, amount, currency, method = cursor.fetchone()
+            cursor.execute("""
+            SELECT seller_username,buyer_username,amount,currency,method
+            FROM deals WHERE id=?
+            """, (did_id,))
 
-        kb = [[
-            InlineKeyboardButton("💸 Release", callback_data=f"release_{did_id}"),
-            InlineKeyboardButton("♻ Refund", callback_data=f"refund_{did_id}"),
-            InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{did_id}")
-        ]]
+            row = cursor.fetchone()
+            if not row:
+                return await q.answer("Deal not found", show_alert=True)
 
-        msg = await context.bot.send_message(
-            chat_id=GROUP_CHAT_ID,
-            text=(
-                f"⚠ @{seller} pls choose action\n\n"
-                f"🆔 {did(did_id)}\n"
-                f"Buyer: @{buyer}"
-            ),
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
+            seller, buyer, amount, currency, method = row
 
-        cursor.execute("""
-        UPDATE deals SET status=?, activator_admin_id=?, deal_message_id=?
-        WHERE id=?
-        """, ("ACTIVE", q.from_user.id, msg.message_id, did_id))
-        conn.commit()
+            kb = [[
+                InlineKeyboardButton("💸 Release", callback_data=f"release_{did_id}"),
+                InlineKeyboardButton("♻ Refund", callback_data=f"refund_{did_id}"),
+                InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{did_id}")
+            ]]
 
-        await q.edit_message_text("Activated")
+            await context.bot.send_message(
+                chat_id=GROUP_CHAT_ID,
+                text=(
+                    f"⚠ @{seller} pls choose action\n\n"
+                    f"🆔 {did(did_id)}\n"
+                    f"Buyer: @{buyer}\n"
+                    f"Amount: {amount} {currency}"
+                ),
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
 
-    elif action == "admincancel":
+            cursor.execute("""
+            UPDATE deals SET status=?, activator_admin_id=?
+            WHERE id=?
+            """, ("ACTIVE", q.from_user.id, did_id))
 
-        cursor.execute("""
-        UPDATE deals SET status=?, handled_by=?
-        WHERE id=?
-        """, ("CANCELLED", safe(q.from_user), did_id))
-        conn.commit()
+            conn.commit()
 
-        await q.edit_message_text("Cancelled")
+            await q.edit_message_text(f"✅ Activated {did(did_id)}")
+            return
 
-# ================= SELLER ACTION =================
+        # ================= CANCEL =================
+        if action == "admincancel":
+
+            cursor.execute("""
+            UPDATE deals SET status=?, handled_by=?
+            WHERE id=?
+            """, ("CANCELLED", safe(q.from_user), did_id))
+
+            conn.commit()
+
+            await q.edit_message_text(f"❌ Cancelled {did(did_id)}")
+            return
+
+    except Exception as e:
+        logger.error(e)
+        await q.answer("Error", show_alert=True)
+
+# ================= SELLER =================
 async def seller_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     q = update.callback_query
@@ -202,20 +219,20 @@ async def seller_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await q.answer("Only seller", show_alert=True)
 
     kb = [[
-        InlineKeyboardButton("✅ Buyer Accept", callback_data=f"buyerok_{did_id}"),
-        InlineKeyboardButton("❌ Buyer Reject", callback_data=f"buyerrej_{did_id}")
+        InlineKeyboardButton("✅ Accept", callback_data=f"buyerok_{did_id}"),
+        InlineKeyboardButton("❌ Reject", callback_data=f"buyerrej_{did_id}")
     ]]
 
     await context.bot.send_message(
         chat_id=GROUP_CHAT_ID,
-        text=f"⚠ @{buyer} pls accept/reject {action}",
+        text=f"⚠ @{buyer} pls confirm seller action {action}",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
     cursor.execute("UPDATE deals SET status=? WHERE id=?", (action.upper(), did_id))
     conn.commit()
 
-# ================= BUYER ACTION =================
+# ================= BUYER =================
 async def buyer_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     q = update.callback_query
@@ -229,7 +246,7 @@ async def buyer_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     FROM deals WHERE id=?
     """, (did_id,))
 
-    buyer, seller, amount, currency, method, created, admin_id = cursor.fetchone()
+    buyer, seller, amount, currency, method, created, admin = cursor.fetchone()
 
     if clean(q.from_user.username) != buyer:
         return await q.answer("Only buyer", show_alert=True)
@@ -237,12 +254,10 @@ async def buyer_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "buyerrej":
         return await q.edit_message_text("Rejected")
 
-    final = "SUCCESSFUL" if action == "buyerok" else "CANCELLED"
-
     # ================= FINAL ADMIN APPROVAL =================
     kb = [[
-        InlineKeyboardButton("✅ Approve Final", callback_data=f"finalok_{did_id}"),
-        InlineKeyboardButton("❌ Reject", callback_data=f"finalno_{did_id}")
+        InlineKeyboardButton("✅ Final Approve", callback_data=f"finalok_{did_id}"),
+        InlineKeyboardButton("❌ Final Reject", callback_data=f"finalno_{did_id}")
     ]]
 
     await context.bot.send_message(
@@ -256,7 +271,7 @@ async def buyer_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
-    cursor.execute("UPDATE deals SET status=? WHERE id=?", (final, did_id))
+    cursor.execute("UPDATE deals SET status=? WHERE id=?", (action.upper(), did_id))
     conn.commit()
 
 # ================= FINAL ADMIN =================
@@ -291,9 +306,9 @@ async def final_approval(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await send_proof(context, text)
-    await q.edit_message_text("Posted to proof + group")
+    await q.edit_message_text("Posted to group + proof")
 
-# ================= HANDLERS =================
+# ================= RUN =================
 app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
