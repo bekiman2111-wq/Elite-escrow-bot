@@ -50,7 +50,7 @@ def deal_id(did):
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "💼 ESCROW BOT IS ACTIVE\n\nType /form to get deal template."
+        "💼 ESCROW BOT ACTIVE\n\nType /form to get deal template."
     )
 
 
@@ -68,13 +68,11 @@ Method:
     await update.message.reply_text(text)
 
 
-# ================= AUTO PARSE DEAL =================
+# ================= PARSER =================
 def parse_form(text: str):
     data = {}
 
-    lines = text.split("\n")
-
-    for line in lines:
+    for line in text.split("\n"):
         if ":" in line:
             key, value = line.split(":", 1)
             data[key.strip().lower()] = value.strip()
@@ -82,14 +80,15 @@ def parse_form(text: str):
     return data
 
 
+# ================= DEAL HANDLER =================
 async def deal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text
-
     data = parse_form(text)
 
-    # must contain required fields
-    if not all(k in data for k in ["seller", "buyer", "amount", "method"]):
+    required = ["seller", "buyer", "amount", "method"]
+
+    if not all(k in data and data[k] for k in required):
         return
 
     cursor.execute("""
@@ -109,7 +108,13 @@ async def deal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     did = cursor.lastrowid
 
     keyboard = [
-        [InlineKeyboardButton("❌ Cancel Deal", callback_data=f"cancel_{did}")]
+        [
+            InlineKeyboardButton("✅ Accept", callback_data=f"accept_{did}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"reject_{did}")
+        ],
+        [
+            InlineKeyboardButton("🛡 Cancel", callback_data=f"cancel_{did}")
+        ]
     ]
 
     await update.message.reply_text(
@@ -125,6 +130,44 @@ async def deal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💼 STATUS: ACTIVE""",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+
+# ================= BUYER ACCEPT =================
+async def accept_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    q = update.callback_query
+    await q.answer()
+
+    did = int(q.data.split("_")[1])
+
+    cursor.execute("""
+    UPDATE deals
+    SET status='ACCEPTED'
+    WHERE id=?
+    """, (did,))
+
+    conn.commit()
+
+    await q.message.reply_text(f"✅ Deal #{did} ACCEPTED by buyer")
+
+
+# ================= BUYER REJECT =================
+async def reject_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    q = update.callback_query
+    await q.answer()
+
+    did = int(q.data.split("_")[1])
+
+    cursor.execute("""
+    UPDATE deals
+    SET status='REJECTED'
+    WHERE id=?
+    """, (did,))
+
+    conn.commit()
+
+    await q.message.reply_text(f"❌ Deal #{did} REJECTED by buyer")
 
 
 # ================= CANCEL =================
@@ -143,25 +186,7 @@ async def cancel_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn.commit()
 
-    await q.message.reply_text(f"❌ Deal #{did} cancelled")
-
-
-# ================= PROFILE =================
-async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user = str(update.effective_user.id)
-
-    cursor.execute("SELECT status FROM deals WHERE created_by=?", (user,))
-    rows = cursor.fetchall()
-
-    await update.message.reply_text(
-        f"""👤 PROFILE
-
-📦 Total: {len(rows)}
-✅ Active: {sum(1 for r in rows if r[0]=='ACTIVE')}
-❌ Cancelled: {sum(1 for r in rows if r[0]=='CANCELLED')}
-"""
-    )
+    await q.message.reply_text(f"🛡 Deal #{did} CANCELLED")
 
 
 # ================= ROUTER =================
@@ -173,7 +198,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await form(update, context)
         return
 
-    # try auto-create deal from filled form
+    # try auto-create deal
     await deal_handler(update, context)
 
 
@@ -182,8 +207,9 @@ app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("form", form))
-app.add_handler(CommandHandler("profile", profile))
 
+app.add_handler(CallbackQueryHandler(accept_deal, pattern="^accept_"))
+app.add_handler(CallbackQueryHandler(reject_deal, pattern="^reject_"))
 app.add_handler(CallbackQueryHandler(cancel_deal, pattern="^cancel_"))
 
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, router))
