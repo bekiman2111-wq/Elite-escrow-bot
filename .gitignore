@@ -1,0 +1,15 @@
+# Database
+escrow.db
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Environment secrets
+.env
+
+# Virtual env (if local)
+venv/
+
+# Logs
+*.log
