@@ -34,16 +34,13 @@ CREATE TABLE IF NOT EXISTS deals (
     buyer TEXT,
     amount TEXT,
     method TEXT,
-    status TEXT DEFAULT 'DRAFT',
+    status TEXT DEFAULT 'ACTIVE',
     created_by TEXT,
     created_at REAL,
     dispute INTEGER DEFAULT 0
 )
 """)
 conn.commit()
-
-# ================= STATE =================
-user_state = {}
 
 # ================= HELPERS =================
 def deal_id(did):
@@ -52,18 +49,12 @@ def deal_id(did):
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    keyboard = [
-        [InlineKeyboardButton("🧾 Create Deal", callback_data="start_deal")]
-    ]
-
     await update.message.reply_text(
-        "💼 ESCROW BOT\nChoose an option:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        "💼 ESCROW BOT IS ACTIVE\n\nType /form to get deal template."
     )
 
 
-# ================= FORM (FIXED - ONLY TEMPLATE) =================
+# ================= FORM =================
 async def form(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = """@admins
@@ -77,88 +68,39 @@ Method:
     await update.message.reply_text(text)
 
 
-# ================= DEAL WIZARD (ONLY FOR CREATE DEAL BUTTON) =================
-async def start_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= AUTO PARSE DEAL =================
+def parse_form(text: str):
+    data = {}
 
-    q = update.callback_query
-    await q.answer()
+    lines = text.split("\n")
 
-    user_state[q.from_user.id] = {
-        "step": "seller",
-        "data": {}
-    }
+    for line in lines:
+        if ":" in line:
+            key, value = line.split(":", 1)
+            data[key.strip().lower()] = value.strip()
 
-    await q.message.reply_text("👤 Send Seller username:")
+    return data
 
 
-async def deal_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def deal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    user_id = update.effective_user.id
     text = update.message.text
 
-    if user_id not in user_state:
+    data = parse_form(text)
+
+    # must contain required fields
+    if not all(k in data for k in ["seller", "buyer", "amount", "method"]):
         return
-
-    state = user_state[user_id]
-    step = state["step"]
-
-    if step == "seller":
-        state["data"]["seller"] = text
-        state["step"] = "buyer"
-        return await update.message.reply_text("👤 Send Buyer username:")
-
-    if step == "buyer":
-        state["data"]["buyer"] = text
-        state["step"] = "amount"
-        return await update.message.reply_text("💰 Send Amount:")
-
-    if step == "amount":
-        state["data"]["amount"] = text
-        state["step"] = "method"
-        return await update.message.reply_text("💳 Send Method:")
-
-    if step == "method":
-        state["data"]["method"] = text
-
-        d = state["data"]
-        user_state.pop(user_id)
-
-        keyboard = [
-            [InlineKeyboardButton("✅ Confirm Deal", callback_data="confirm_deal")],
-            [InlineKeyboardButton("❌ Cancel", callback_data="cancel_deal")]
-        ]
-
-        await update.message.reply_text(
-            f"""🚨 DEAL PREVIEW
-
-👤 Seller: {d['seller']}
-👤 Buyer: {d['buyer']}
-💰 Amount: {d['amount']}
-💳 Method: {d['method']}
-
-⚠ Confirm to create deal""",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-
-# ================= CONFIRM DEAL =================
-async def confirm_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    q = update.callback_query
-    await q.answer()
-
-    user_id = q.from_user.id
-    data = user_state.get(user_id, {}).get("data", {})
 
     cursor.execute("""
     INSERT INTO deals (seller, buyer, amount, method, status, created_by, created_at)
     VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?)
     """, (
-        data.get("seller"),
-        data.get("buyer"),
-        data.get("amount"),
-        data.get("method"),
-        str(user_id),
+        data["seller"],
+        data["buyer"],
+        data["amount"],
+        data["method"],
+        str(update.effective_user.id),
         time.time()
     ))
 
@@ -166,8 +108,22 @@ async def confirm_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     did = cursor.lastrowid
 
-    await q.message.reply_text(
-        f"✅ DEAL CREATED\n\n🆔 {deal_id(did)}\n\n💼 ACTIVE"
+    keyboard = [
+        [InlineKeyboardButton("❌ Cancel Deal", callback_data=f"cancel_{did}")]
+    ]
+
+    await update.message.reply_text(
+        f"""🚨 NEW DEAL CREATED
+
+🆔 {deal_id(did)}
+
+👤 Seller: {data['seller']}
+👤 Buyer: {data['buyer']}
+💰 Amount: {data['amount']}
+💳 Method: {data['method']}
+
+💼 STATUS: ACTIVE""",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
@@ -177,9 +133,17 @@ async def cancel_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    user_state.pop(q.from_user.id, None)
+    did = int(q.data.split("_")[1])
 
-    await q.message.reply_text("❌ Deal cancelled")
+    cursor.execute("""
+    UPDATE deals
+    SET status='CANCELLED'
+    WHERE id=?
+    """, (did,))
+
+    conn.commit()
+
+    await q.message.reply_text(f"❌ Deal #{did} cancelled")
 
 
 # ================= PROFILE =================
@@ -193,61 +157,11 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"""👤 PROFILE
 
-📦 Total Deals: {len(rows)}
+📦 Total: {len(rows)}
 ✅ Active: {sum(1 for r in rows if r[0]=='ACTIVE')}
 ❌ Cancelled: {sum(1 for r in rows if r[0]=='CANCELLED')}
 """
     )
-
-
-# ================= MY DEALS =================
-async def mydeals(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user = str(update.effective_user.id)
-
-    cursor.execute("""
-    SELECT id, seller, buyer, amount, method, status
-    FROM deals WHERE created_by=?
-    ORDER BY id DESC
-    """, (user,))
-
-    rows = cursor.fetchall()
-
-    if not rows:
-        return await update.message.reply_text("No deals found.")
-
-    text = "📊 YOUR DEALS\n\n"
-
-    for r in rows:
-        did, seller, buyer, amount, method, status = r
-
-        text += (
-            f"🆔 {deal_id(did)}\n"
-            f"👤 {seller} → {buyer}\n"
-            f"💰 {amount} | 💳 {method}\n"
-            f"📌 {status}\n\n"
-        )
-
-    await update.message.reply_text(text)
-
-
-# ================= DISPUTE =================
-async def dispute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not context.args:
-        return await update.message.reply_text("Usage: /dispute <deal_id>")
-
-    did = context.args[0]
-
-    cursor.execute("""
-    UPDATE deals
-    SET status='DISPUTE', dispute=1
-    WHERE id=?
-    """, (did,))
-
-    conn.commit()
-
-    await update.message.reply_text(f"⚠ Deal #{did} is now under dispute")
 
 
 # ================= ROUTER =================
@@ -257,21 +171,21 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text and text.lower() == "form":
         await form(update, context)
+        return
+
+    # try auto-create deal from filled form
+    await deal_handler(update, context)
 
 
 # ================= MAIN =================
 app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("form", form))
 app.add_handler(CommandHandler("profile", profile))
-app.add_handler(CommandHandler("mydeals", mydeals))
-app.add_handler(CommandHandler("dispute", dispute))
 
-app.add_handler(CallbackQueryHandler(start_deal, pattern="^start_deal$"))
-app.add_handler(CallbackQueryHandler(confirm_deal, pattern="^confirm_deal$"))
-app.add_handler(CallbackQueryHandler(cancel_deal, pattern="^cancel_deal$"))
+app.add_handler(CallbackQueryHandler(cancel_deal, pattern="^cancel_"))
 
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, deal_wizard))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, router))
 
 app.run_polling()
