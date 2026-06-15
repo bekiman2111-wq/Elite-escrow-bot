@@ -23,8 +23,6 @@ TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN missing")
 
-ADMIN_IDS = [6138132255, 5635739078]
-
 # ================= DATABASE =================
 conn = sqlite3.connect("escrow.db", check_same_thread=False)
 cursor = conn.cursor()
@@ -56,35 +54,30 @@ def deal_id(did):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
-        [InlineKeyboardButton("🧾 Create Deal", callback_data="start_deal")],
-        [InlineKeyboardButton("📋 Form", callback_data="show_form")]
+        [InlineKeyboardButton("🧾 Create Deal", callback_data="start_deal")]
     ]
 
     await update.message.reply_text(
-        "💼 ESCROW PLATFORM\nChoose an option:",
+        "💼 ESCROW BOT\nChoose an option:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
-# ================= FORM =================
+# ================= FORM (FIXED - ONLY TEMPLATE) =================
 async def form(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    text = """🧾 ESCROW DEAL FORM
+    text = """@admins
 
-━━━━━━━━━━━━━━
-👤 Seller:
-👤 Buyer:
-💰 Amount:
-💳 Method:
-━━━━━━━━━━━━━━
-
-📌 Fill and send this message back.
+Seller:
+Buyer:
+Amount:
+Method:
 """
 
     await update.message.reply_text(text)
 
 
-# ================= WIZARD START =================
+# ================= DEAL WIZARD (ONLY FOR CREATE DEAL BUTTON) =================
 async def start_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     q = update.callback_query
@@ -98,7 +91,6 @@ async def start_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.message.reply_text("👤 Send Seller username:")
 
 
-# ================= WIZARD =================
 async def deal_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
@@ -258,7 +250,7 @@ async def dispute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"⚠ Deal #{did} is now under dispute")
 
 
-# ================= ROUTER (FORM TRIGGER) =================
+# ================= ROUTER =================
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text
